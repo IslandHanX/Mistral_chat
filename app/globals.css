@@ -1,0 +1,16 @@
+
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; padding: 0; }
+body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+.container { max-width: 800px; margin: 0 auto; padding: 24px; }
+.card { border: 1px solid rgba(127,127,127,.2); border-radius: 12px; padding: 16px; }
+.row { display: flex; gap: 8px; }
+.input { width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(127,127,127,.3); }
+.btn { padding: 10px 14px; border-radius: 10px; border: 1px solid rgba(127,127,127,.3); cursor: pointer; background: transparent; }
+.msg { white-space: pre-wrap; line-height: 1.5; }
+.msg.assistant { background: rgba(127,127,127,.08); border-radius: 10px; padding: 10px 12px; }
+.msg.user { background: transparent; border-left: 3px solid rgba(127,127,127,.25); padding: 10px 12px; }
+.meta { font-size: 12px; opacity: .7; }
+hr { border: none; border-top: 1px solid rgba(127,127,127,.2); margin: 12px 0; }
+select { padding: 8px 10px; border-radius: 10px; border: 1px solid rgba(127,127,127,.3); }
