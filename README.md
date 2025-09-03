@@ -27,8 +27,7 @@ npm i
 ```
 
 3) **Add API key**:
-   - Copy `.env.example` → `.env.local`
-   - Put your key in `MISTRAL_API_KEY="..."`
+   - Put your key in `MISTRAL_API_KEY="..."` → `.env.local`
 
 4) **Run the dev server**:
 
