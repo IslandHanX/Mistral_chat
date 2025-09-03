@@ -79,18 +79,6 @@ Run the full test suite:
 npm test
 ```
 
-Generate coverage:
-
-```bash
-npm test -- --coverage
-```
-
-Run a specific file / test:
-
-```bash
-npx vitest app/page.test.tsx -t "Stop aborts cleanly"
-```
-
 ### What the tests cover
 
 #### 1) Server route — `app/api/chat/route.test.ts`
