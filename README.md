@@ -23,7 +23,6 @@ A minimal, production‑leaning chat app built with **Next.js (App Router)** + *
 
 ```bash
 npm i
-# or: pnpm i / yarn
 ```
 
 3) **Add API key**:
@@ -54,19 +53,26 @@ Open http://localhost:3000
 ```
 mistral-next-chat/
 ├─ app/
-│  ├─ api/chat/route.ts     # Node runtime route; proxies & streams SSE from Mistral (with 429 fallback)
-│  ├─ globals.css           # Minimal styling
-│  └─ page.tsx              # Chat UI + streaming client code (Stop/Reset, Markdown render)
+│  ├─ api/chat/route.ts          # Server: proxy to Mistral + SSE pass-through (with 429 fallback)
+│  ├─ globals.css
+│  ├─ layout.tsx
+│  └─ page.tsx                   # Client: streaming UI (Markdown, Stop/Reset)
 ├─ lib/
-│  └─ sse.ts                # Tiny SSE line parser (also unit-tested)
+│  └─ sse.ts                     # SSE line parser
 ├─ tests/
-│  ├─ sse.test.ts           # Parser smoke test
-│  ├─ app/api/chat/route.test.ts   # Server route tests (axios mocked; Node Readable)
-│  └─ app/page.test.tsx     # Client streaming UI tests (jsdom; ReadableStream)
+│  ├─ app/api/chat/route.test.ts # Server route tests (axios mocked; Node Readable)
+│  ├─ app/page.test.tsx          # Client streaming UI tests (jsdom; ReadableStream)
+│  └─ sse.test.ts                # Parser smoke test
+├─ __mocks__/
+│  └─ axios.ts                   # (Optional) file-level axios mock
+├─ public/                       # (Optional) static assets (.gitkeep)
 ├─ .env.example
+├─ .gitignore
+├─ README.md
 ├─ package.json
 ├─ tsconfig.json
-└─ README.md
+├─ vitest.config.ts
+└─ vitest.setup.ts
 ```
 
 ---
@@ -99,11 +105,6 @@ npm test
   `mistral-medium-latest`, then `mistral-small-latest`. The final selection is
   exposed via the response header.
 
-> **Technical notes:**  
-> - `axios` is **fully mocked**.  
-> - Upstream bodies are faked with **Node `Readable` streams** to emulate SSE and error payloads.  
-> - No real network calls happen in tests.
-
 #### 2) Client streaming UI — `app/page.test.tsx`
 
 - **renders assistant markdown as chunks arrive (SSE parsing)**  
@@ -122,12 +123,6 @@ npm test
   Assertions:
   - Cancels the reader and resets UI from **Stop → Reset** (`pending=false`).
   - No uncaught errors.
-
-> **Technical notes:**  
-> - Environment: `jsdom` + `@testing-library/react`.  
-> - To avoid “Found multiple elements …” when querying text that may appear in multiple nodes,
->   use a **selector** to scope the assertion, e.g. `findByText('Bonjour !', { selector: 'p', exact: true })`.  
-> - Global `fetch` is restored after each test.
 
 #### 3) SSE parser smoke test — `tests/sse.test.ts`
 
