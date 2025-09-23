@@ -1,6 +1,7 @@
 # Mistral Next.js Chat (Streaming)
 
 A minimal, production‑leaning chat app built with **Next.js (App Router)** + **TypeScript** that streams responses from **Mistral AI**’s public API.
+Try it at: https://mistral-chat-xi.vercel.app/
 
 ---
 
