@@ -36,7 +36,8 @@ export async function openMistralStream({
   for (const model of models) {
     for (let attempt = 0; attempt < LIMITS.attemptsPerModel; attempt++) {
       if (attempt > 0) {
-        const base = 250 * 2 ** (attempt - 1);
+        // The free tier allows about one request per second, so a quicker retry after a 429 fails again.
+        const base = attempts.at(-1)?.status === 429 ? 1_000 : 250 * 2 ** (attempt - 1);
         await sleep(base + Math.floor(Math.random() * base));
       }
       if (signal?.aborted) return { ok: false, status: 499, code: 'client_closed', attempts };
