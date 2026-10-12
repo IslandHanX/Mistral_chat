@@ -112,12 +112,14 @@ describe('POST /api/chat', () => {
     ]);
   });
 
-  it('does not retry a request Mistral rejects, and does not leak its message', async () => {
+  it('does not retry a request Mistral rejects, and logs its message without leaking it', async () => {
     fetchMock.mockResolvedValueOnce(status(400));
     const res = await POST(chat({ messages: [{ role: 'user', content: 'hi' }] }));
     expect(res.status).toBe(502);
     expect(await res.text()).not.toContain('upstream detail');
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    const logged = JSON.parse(String(vi.mocked(console.log).mock.calls.at(-1)?.[0]));
+    expect(logged).toMatchObject({ attempts: 'mistral-small-latest:400', upstreamMessage: 'upstream detail' });
   });
 
   it('answers 503 when every allowed model is unavailable', async () => {
