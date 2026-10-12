@@ -1,8 +1,8 @@
 import { useState, type KeyboardEvent } from 'react';
 
 export const MODEL_OPTIONS = [
-  { id: 'mistral-small-latest', label: 'Mistral Small' },
-  { id: 'mistral-medium-latest', label: 'Mistral Medium' },
+  { id: 'ministral-8b-2512', label: 'Ministral 8B' },
+  { id: 'ministral-14b-2512', label: 'Ministral 14B' },
 ];
 
 type Props = {

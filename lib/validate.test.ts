@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { LIMITS, type ModelId } from './config';
 import { parseChatRequest } from './validate';
 
-const allowed: ModelId[] = ['mistral-small-latest', 'mistral-medium-latest'];
+const allowed: ModelId[] = ['ministral-8b-2512', 'ministral-14b-2512'];
 const user = (content: string) => ({ role: 'user', content });
 
 describe('parseChatRequest', () => {
@@ -10,7 +10,7 @@ describe('parseChatRequest', () => {
     const r = parseChatRequest({ messages: [user('hi'), { role: 'assistant', content: '' }, user('again')] }, allowed);
     expect(r).toEqual({
       ok: true,
-      value: { model: 'mistral-small-latest', messages: [user('hi'), user('again')] },
+      value: { model: 'ministral-8b-2512', messages: [user('hi'), user('again')] },
     });
   });
 

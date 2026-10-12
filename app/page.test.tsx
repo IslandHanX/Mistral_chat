@@ -25,7 +25,7 @@ it('renders the streamed answer with the model and timing', async () => {
       async () =>
         new Response(
           ndjson([
-            { type: 'meta', model: 'mistral-small-latest', fallbackFrom: 'mistral-medium-latest' },
+            { type: 'meta', model: 'ministral-8b-2512', fallbackFrom: 'ministral-14b-2512' },
             { type: 'delta', text: 'Bonjour' },
             { type: 'delta', text: ' !' },
             { type: 'done', ms: 1200, usage: { promptTokens: 4, completionTokens: 3 } },
@@ -39,7 +39,7 @@ it('renders the streamed answer with the model and timing', async () => {
 
   expect(await screen.findByText('Bonjour !')).toBeInTheDocument();
   expect(
-    await screen.findByText('mistral-small · fell back from mistral-medium · 1.2 s · 3 tokens'),
+    await screen.findByText('ministral-8b · fell back from ministral-14b · 1.2 s · 3 tokens'),
   ).toBeInTheDocument();
 });
 
@@ -68,7 +68,7 @@ it('stops a running answer and lets the user send again', async () => {
       const stream = new ReadableStream<Uint8Array>({
         start(c) {
           ctrl = c;
-          c.enqueue(enc.encode(`${JSON.stringify({ type: 'meta', model: 'mistral-small-latest' })}\n`));
+          c.enqueue(enc.encode(`${JSON.stringify({ type: 'meta', model: 'ministral-8b-2512' })}\n`));
           c.enqueue(enc.encode(`${JSON.stringify({ type: 'delta', text: 'partial' })}\n`));
         },
       });

@@ -83,7 +83,7 @@ describe('POST /api/chat', () => {
     );
     expect(res.headers.get('content-type')).toMatch(/application\/x-ndjson/);
     const evs = await events(res);
-    expect(evs[0]).toEqual({ type: 'meta', model: 'mistral-small-latest' });
+    expect(evs[0]).toEqual({ type: 'meta', model: 'ministral-8b-2512' });
     expect(
       evs
         .filter((e) => e.type === 'delta')
@@ -93,7 +93,7 @@ describe('POST /api/chat', () => {
     expect(evs.at(-1)).toMatchObject({ type: 'done', usage: { promptTokens: 5, completionTokens: 2 } });
 
     const sent = JSON.parse(fetchMock.mock.calls[0][1].body);
-    expect(sent).toMatchObject({ model: 'mistral-small-latest', stream: true, max_tokens: 1024 });
+    expect(sent).toMatchObject({ model: 'ministral-8b-2512', stream: true, max_tokens: 1024 });
     expect(sent.messages).toEqual([
       { role: 'user', content: 'hi' },
       { role: 'user', content: 'again' },
@@ -102,13 +102,13 @@ describe('POST /api/chat', () => {
 
   it('falls back to a cheaper model when the requested one stays saturated', async () => {
     fetchMock.mockResolvedValueOnce(status(429)).mockResolvedValueOnce(status(429)).mockResolvedValueOnce(ok(hello));
-    const res = await POST(chat({ model: 'mistral-medium-latest', messages: [{ role: 'user', content: 'hi' }] }));
+    const res = await POST(chat({ model: 'ministral-14b-2512', messages: [{ role: 'user', content: 'hi' }] }));
     const evs = await events(res);
-    expect(evs[0]).toEqual({ type: 'meta', model: 'mistral-small-latest', fallbackFrom: 'mistral-medium-latest' });
+    expect(evs[0]).toEqual({ type: 'meta', model: 'ministral-8b-2512', fallbackFrom: 'ministral-14b-2512' });
     expect(fetchMock.mock.calls.map((c) => JSON.parse(c[1].body).model)).toEqual([
-      'mistral-medium-latest',
-      'mistral-medium-latest',
-      'mistral-small-latest',
+      'ministral-14b-2512',
+      'ministral-14b-2512',
+      'ministral-8b-2512',
     ]);
   });
 
@@ -119,7 +119,7 @@ describe('POST /api/chat', () => {
     expect(await res.text()).not.toContain('upstream detail');
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const logged = JSON.parse(String(vi.mocked(console.log).mock.calls.at(-1)?.[0]));
-    expect(logged).toMatchObject({ attempts: 'mistral-small-latest:400', upstreamMessage: 'upstream detail' });
+    expect(logged).toMatchObject({ attempts: 'ministral-8b-2512:400', upstreamMessage: 'upstream detail' });
   });
 
   it('answers 503 when every allowed model is unavailable', async () => {
