@@ -63,7 +63,12 @@ export async function POST(req: Request): Promise<Response> {
   });
 
   if (!upstream.ok) {
-    log({ outcome: upstream.code, requested, attempts: summarize(upstream.attempts) });
+    log({
+      outcome: upstream.code,
+      requested,
+      attempts: summarize(upstream.attempts),
+      upstreamMessage: lastMessage(upstream.attempts),
+    });
     const status = upstream.code === 'upstream_unavailable' ? 503 : 502;
     return jsonError(status, upstream.code, MESSAGES[upstream.code] ?? MESSAGES.upstream_rejected, requestId);
   }
@@ -72,7 +77,15 @@ export async function POST(req: Request): Promise<Response> {
     meta: { type: 'meta', model: upstream.model, ...(upstream.model !== requested ? { fallbackFrom: requested } : {}) },
     started,
     onEnd: (outcome, usage, firstTokenMs) =>
-      log({ outcome, requested, model: upstream.model, attempts: summarize(upstream.attempts), firstTokenMs, usage }),
+      log({
+        outcome,
+        requested,
+        model: upstream.model,
+        attempts: summarize(upstream.attempts),
+        upstreamMessage: lastMessage(upstream.attempts),
+        firstTokenMs,
+        usage,
+      }),
   });
 
   return new Response(stream, {
@@ -163,6 +176,11 @@ function toEventStream(
 
 function summarize(attempts: Attempt[]) {
   return attempts.map((a) => `${a.model}:${a.status}`).join(',');
+}
+
+// Logged only: the client always gets one of the generic MESSAGES.
+function lastMessage(attempts: Attempt[]) {
+  return attempts.filter((a) => a.message).at(-1)?.message;
 }
 
 function clientIp(req: Request): string {

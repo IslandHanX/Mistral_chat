@@ -4,7 +4,7 @@ import type { ChatMessage } from './validate';
 const MISTRAL_URL = 'https://api.mistral.ai/v1/chat/completions';
 const RETRYABLE = new Set([429, 500, 502, 503, 504]);
 
-export type Attempt = { model: ModelId; status: number | 'timeout' | 'network' };
+export type Attempt = { model: ModelId; status: number | 'timeout' | 'network'; message?: string };
 
 export type UpstreamResult =
   | { ok: true; model: ModelId; body: ReadableStream<Uint8Array>; attempts: Attempt[] }
@@ -63,14 +63,17 @@ export async function openMistralStream({
         });
       } catch (err) {
         if (signal?.aborted) return { ok: false, status: 499, code: 'client_closed', attempts };
-        attempts.push({ model, status: timeout.aborted ? 'timeout' : 'network' });
+        attempts.push({
+          model,
+          status: timeout.aborted ? 'timeout' : 'network',
+          message: err instanceof Error ? err.message : String(err),
+        });
         continue;
       }
 
       if (res.ok && res.body) return { ok: true, model, body: res.body, attempts };
 
-      attempts.push({ model, status: res.status });
-      await res.body?.cancel().catch(() => undefined);
+      attempts.push({ model, status: res.status, message: await errorMessage(res) });
       if (!RETRYABLE.has(res.status)) {
         // 401/403 mean the server's key is wrong; 400/422 mean a request the provider refuses.
         const code = res.status === 401 || res.status === 403 ? 'upstream_auth' : 'upstream_rejected';
@@ -80,4 +83,16 @@ export async function openMistralStream({
   }
 
   return { ok: false, status: 503, code: 'upstream_unavailable', attempts };
+}
+
+async function errorMessage(res: Response): Promise<string | undefined> {
+  const text = await res.text().catch(() => '');
+  let message = text;
+  try {
+    const parsed = JSON.parse(text) as { message?: unknown };
+    if (typeof parsed.message === 'string') message = parsed.message;
+  } catch {
+    // Not JSON: keep the raw text.
+  }
+  return message.trim().slice(0, 200) || undefined;
 }
