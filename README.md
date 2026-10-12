@@ -8,7 +8,7 @@ A small streaming chat on [Mistral AI](https://mistral.ai), built with Next.js a
 
 - **Streams answers** token by token, with Markdown and code blocks.
 - **Shows how each answer was produced:** the model that answered, whether it fell back from the one requested, the time it took and the tokens it used.
-- **Falls back and retries before the first byte.** On a 429, a 5xx or no first byte within 20 s, it retries once with backoff and jitter, then moves to the next cheaper allowed model. It never switches model once text has reached the user, which would mix two answers.
+- **Falls back and retries before the first byte.** On a 429, a 5xx or no first byte within 20 s, it retries once with backoff and jitter (at least a second after a 429), then moves to the next smaller allowed model. It never switches model once text has reached the user, which would mix two answers.
 - **Protects the key and the bill:** the browser only talks to `/api/chat`; the server accepts only allowed models, caps the conversation size and the output tokens, and rate limits each client.
 - **Cancels end to end:** pressing Stop aborts the request to Mistral too, instead of letting it run.
 - **Fails readably:** errors come back as `{ "error": { "code", "message" } }` with a message fit for the user and no upstream internals; a stream that breaks halfway ends with an explicit error event.
@@ -46,10 +46,12 @@ Passing Mistral's raw stream through would leave the browser without the model a
 
 | Setting | Value |
 |---|---|
-| Models | `mistral-small-latest`, `mistral-medium-latest` (set `ALLOWED_MODELS` to change) |
+| Models | `ministral-8b-2512` by default, `ministral-14b-2512` on request, `ministral-3b-2512` as the last fallback (set `ALLOWED_MODELS` to change) |
 | Conversation | up to 30 messages, 4,000 characters per message, 24,000 in total |
 | Answer | up to 1,024 tokens |
 | Rate limit | 8 requests per minute per client IP |
+
+The demo runs on Mistral's free tier, which answers the Large, Medium and Small models with a 429 whatever the traffic, so it uses the Ministral models. With pay-as-you-go enabled, add the larger models to `ALLOWED_MODELS`.
 
 The rate limiter lives in memory, so on a serverless platform each instance counts separately. That is enough to stop casual abuse of a demo; a shared store such as Redis would be the next step for a real product.
 

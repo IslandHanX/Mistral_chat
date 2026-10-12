@@ -2,7 +2,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { UiMessage } from '@/hooks/useChat';
 
-const short = (model: string) => model.replace(/-latest$/, '');
+const short = (model: string) => model.replace(/-(latest|\d{4})$/, '');
 
 export function MessageView({ message, streaming }: { message: UiMessage; streaming: boolean }) {
   if (message.role === 'user') {
