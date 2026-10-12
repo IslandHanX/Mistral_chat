@@ -1,8 +1,12 @@
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 
 export default defineConfig({
-  plugins: [react()],            // ✅ 让 JSX 走 React 自动运行时
+  plugins: [react()],
+  resolve: {
+    alias: { '@': fileURLToPath(new URL('.', import.meta.url)) },
+  },
   test: {
     environment: 'node',
     environmentMatchGlobs: [['**/*.test.tsx', 'jsdom']],
@@ -13,6 +17,6 @@ export default defineConfig({
     clearMocks: true,
   },
   esbuild: {
-    jsx: 'automatic',            // 双保险
+    jsx: 'automatic',
   },
 });

@@ -1,83 +1,88 @@
-import React from 'react';
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import Page from './page';
 
-const OLD_FETCH = globalThis.fetch;
-
-// 按微任务推进的有限 SSE
-function makeFiniteSSE(lines: string[]) {
+function ndjson(events: object[], { keepOpen = false } = {}) {
+  const enc = new TextEncoder();
   return new ReadableStream<Uint8Array>({
     start(controller) {
-      const enc = new TextEncoder();
-      let i = 0;
-      const push = () => {
-        if (i >= lines.length) return controller.close();
-        controller.enqueue(enc.encode(lines[i++]));
-        queueMicrotask(push);
-      };
-      push();
+      for (const e of events) controller.enqueue(enc.encode(`${JSON.stringify(e)}\n`));
+      if (!keepOpen) controller.close();
     },
   });
 }
 
-// 常驻（不 close）的 SSE，方便测试 Stop
-function makeNeverEndingSSE(first = 'data: {"choices":[{"delta":{"content":"chunk"}}]}\n') {
-  return new ReadableStream<Uint8Array>({
-    start(controller) {
-      const enc = new TextEncoder();
-      controller.enqueue(enc.encode(first));
-      // 不再 close，等待 cancel()
-    },
-  });
-}
-
+beforeEach(() => localStorage.clear());
 afterEach(() => {
-  globalThis.fetch = OLD_FETCH as any;
-  (window as any).fetch = OLD_FETCH as any;
+  vi.unstubAllGlobals();
 });
 
-it('renders assistant markdown as chunks arrive (SSE parsing)', async () => {
-  const fetchMock = vi.fn(async () => {
-    const body = makeFiniteSSE([
-      'data: {"choices":[{"delta":{"content":"Bonjour"}}]}\n',
-      'data: {"choices":[{"delta":{"content":" !"}}]}\n',
-      'data: [DONE]\n',
-    ]);
-    return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } }) as any;
-  });
-  globalThis.fetch = fetchMock as any;
-  (window as any).fetch = fetchMock as any;
-
+it('renders the streamed answer with the model and timing', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(
+      async () =>
+        new Response(
+          ndjson([
+            { type: 'meta', model: 'mistral-small-latest', fallbackFrom: 'mistral-medium-latest' },
+            { type: 'delta', text: 'Bonjour' },
+            { type: 'delta', text: ' !' },
+            { type: 'done', ms: 1200, usage: { promptTokens: 4, completionTokens: 3 } },
+          ]),
+          { status: 200 },
+        ),
+    ),
+  );
   render(<Page />);
-  await userEvent.click(screen.getByRole('button', { name: /send/i }));
+  await userEvent.type(screen.getByLabelText('Message'), 'Salut{Enter}');
 
-  // 用 textContent 断言，避免被 Markdown 拆 node 影响
-	const ok = await screen.findByText('Bonjour !', {
-	selector: 'p',
-	exact: true,
-	timeout: 10000,
-	});
+  expect(await screen.findByText('Bonjour !')).toBeInTheDocument();
+  expect(
+    await screen.findByText('mistral-small · fell back from mistral-medium · 1.2 s · 3 tokens'),
+  ).toBeInTheDocument();
+});
 
-  expect(ok).toBeInTheDocument();
-}, 10000);
-
-it('Stop aborts cleanly without throwing and resets pending state', async () => {
-  const fetchMock = vi.fn(async () => {
-    const body = makeNeverEndingSSE();
-    return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } }) as any;
-  });
-  globalThis.fetch = fetchMock as any;
-  (window as any).fetch = fetchMock as any;
-
+it('shows the server message when the request is refused', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({ error: { code: 'rate_limited', message: 'Too many messages. Try again in 30 s.' } }),
+          { status: 429 },
+        ),
+    ),
+  );
   render(<Page />);
+  await userEvent.type(screen.getByLabelText('Message'), 'hi{Enter}');
+  expect(await screen.findByText('Too many messages. Try again in 30 s.')).toBeInTheDocument();
+});
 
-  await userEvent.click(screen.getByRole('button', { name: /send/i }));
-  const stopBtn = await screen.findByRole('button', { name: /stop/i }, { timeout: 10000 });
+it('stops a running answer and lets the user send again', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (_url: string, init: RequestInit) => {
+      const enc = new TextEncoder();
+      let ctrl!: ReadableStreamDefaultController<Uint8Array>;
+      const stream = new ReadableStream<Uint8Array>({
+        start(c) {
+          ctrl = c;
+          c.enqueue(enc.encode(`${JSON.stringify({ type: 'meta', model: 'mistral-small-latest' })}\n`));
+          c.enqueue(enc.encode(`${JSON.stringify({ type: 'delta', text: 'partial' })}\n`));
+        },
+      });
+      init.signal?.addEventListener('abort', () =>
+        ctrl.error(new DOMException('The operation was aborted.', 'AbortError')),
+      );
+      return new Response(stream, { status: 200 });
+    }),
+  );
+  render(<Page />);
+  await userEvent.type(screen.getByLabelText('Message'), 'hi{Enter}');
+  await userEvent.click(await screen.findByRole('button', { name: 'Stop' }));
 
-  await userEvent.click(stopBtn);
-
-  const resetBtn = await screen.findByRole('button', { name: /reset/i }, { timeout: 10000 });
-  expect(resetBtn).toBeInTheDocument();
-}, 10000);
+  expect(await screen.findByText('Stopped.')).toBeInTheDocument();
+  expect(screen.getByText('partial')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Send' })).toBeInTheDocument();
+});

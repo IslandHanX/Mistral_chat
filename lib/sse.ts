@@ -1,17 +1,24 @@
-// lib/sse.ts
-export function extractDeltaContentFromSSE(buffer: string): string[] {
-  const out: string[] = [];
-  for (const line of buffer.split('\n')) {
-    if (!line.startsWith('data:')) continue;
-    const data = line.slice(5).trim();
-    if (!data || data === '[DONE]') continue;
-    try {
-      const obj = JSON.parse(data);
-      const delta = obj?.choices?.[0]?.delta?.content ?? '';
-      if (delta) out.push(delta);
-    } catch {
-      // 忽略半包，等下一轮
-    }
+// Incremental parser for `data:` lines of a server-sent event stream: a line can
+// arrive split across chunks, so the unfinished tail is kept until the next push.
+export class SseDataParser {
+  private buffer = '';
+
+  push(chunk: string): string[] {
+    this.buffer += chunk;
+    const lines = this.buffer.split(/\r?\n/);
+    this.buffer = lines.pop() ?? '';
+    return lines.flatMap(dataOf);
   }
-  return out;
+
+  flush(): string[] {
+    const rest = this.buffer;
+    this.buffer = '';
+    return dataOf(rest);
+  }
+}
+
+function dataOf(line: string): string[] {
+  if (!line.startsWith('data:')) return [];
+  const data = line.slice(5).trim();
+  return data ? [data] : [];
 }

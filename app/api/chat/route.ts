@@ -1,158 +1,187 @@
-import { NextRequest } from 'next/server';
+import { RATE_LIMIT, allowedModels, fallbackChain } from '@/lib/config';
+import { encodeEvent, type ChatEvent, type Usage } from '@/lib/events';
+import { openMistralStream, type Attempt } from '@/lib/mistral';
+import { mockFetch } from '@/lib/mock';
+import { createRateLimiter } from '@/lib/rate-limit';
+import { SseDataParser } from '@/lib/sse';
+import { parseChatRequest } from '@/lib/validate';
+
 export const runtime = 'nodejs';
 
-import dns from 'node:dns';
-dns.setDefaultResultOrder('ipv4first'); // 避免部分环境 IPv6 坑
+const limiter = createRateLimiter(RATE_LIMIT);
 
-import fs from 'node:fs';
-import https from 'node:https';
-import axios from 'axios';
-import { Readable } from 'node:stream';
+const MESSAGES: Record<string, string> = {
+  upstream_unavailable: 'The model is busy right now. Please try again in a moment.',
+  upstream_rejected: 'The model could not answer this request.',
+  upstream_auth: 'The server is not configured correctly.',
+  client_closed: 'The request was cancelled.',
+};
 
-// ---- utils ----
-function sleep(ms: number) {
-  return new Promise(r => setTimeout(r, ms));
-}
+export async function POST(req: Request): Promise<Response> {
+  const started = Date.now();
+  const requestId = crypto.randomUUID();
+  const log = (fields: Record<string, unknown>) =>
+    console.log(JSON.stringify({ event: 'chat_request', requestId, ms: Date.now() - started, ...fields }));
 
-// Node Readable -> Web ReadableStream（兼容旧 Node 没有 toWeb 的情况）
-function toWebStream(nodeReadable: any): ReadableStream<Uint8Array> {
-  if ((Readable as any).toWeb) {
-    return (Readable as any).toWeb(nodeReadable) as unknown as ReadableStream<Uint8Array>;
+  const mock = !process.env.MISTRAL_API_KEY && process.env.MOCK_MISTRAL === '1';
+  const apiKey = mock ? 'mock' : process.env.MISTRAL_API_KEY;
+  if (!apiKey) {
+    log({ outcome: 'missing_api_key' });
+    return jsonError(500, 'server_misconfigured', MESSAGES.upstream_auth, requestId);
   }
-  // 兜底转换：把 Node 流包成 Web ReadableStream
-  const encoder = new TextEncoder();
-  return new ReadableStream<Uint8Array>({
-    start(controller) {
-      nodeReadable.setEncoding?.('utf8');
-      nodeReadable.on('data', (chunk: string | Buffer) => {
-        const buf = typeof chunk === 'string' ? encoder.encode(chunk) : new Uint8Array(chunk);
-        controller.enqueue(buf);
-      });
-      nodeReadable.on('error', (err: any) => controller.error(err));
-      nodeReadable.on('end', () => controller.close());
-    }
+
+  const decision = limiter.check(clientIp(req));
+  if (!decision.allowed) {
+    const seconds = Math.ceil(decision.retryAfterMs / 1000);
+    log({ outcome: 'rate_limited' });
+    return jsonError(429, 'rate_limited', `Too many messages. Try again in ${seconds} s.`, requestId, {
+      'Retry-After': String(seconds),
+    });
+  }
+
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return jsonError(400, 'bad_json', 'The request body is not valid JSON.', requestId);
+  }
+
+  const allowed = allowedModels();
+  const parsed = parseChatRequest(body, allowed);
+  if (!parsed.ok) {
+    log({ outcome: 'invalid_request' });
+    return jsonError(400, 'invalid_request', parsed.message, requestId);
+  }
+
+  const { model: requested, messages } = parsed.value;
+  const upstream = await openMistralStream({
+    apiKey,
+    models: fallbackChain(requested, allowed),
+    messages,
+    signal: req.signal,
+    ...(mock ? { fetchImpl: mockFetch } : {}),
+  });
+
+  if (!upstream.ok) {
+    log({ outcome: upstream.code, requested, attempts: summarize(upstream.attempts) });
+    const status = upstream.code === 'upstream_unavailable' ? 503 : 502;
+    return jsonError(status, upstream.code, MESSAGES[upstream.code] ?? MESSAGES.upstream_rejected, requestId);
+  }
+
+  const stream = toEventStream(upstream.body, {
+    meta: { type: 'meta', model: upstream.model, ...(upstream.model !== requested ? { fallbackFrom: requested } : {}) },
+    started,
+    onEnd: (outcome, usage, firstTokenMs) =>
+      log({ outcome, requested, model: upstream.model, attempts: summarize(upstream.attempts), firstTokenMs, usage }),
+  });
+
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'application/x-ndjson; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      'X-Request-Id': requestId,
+    },
   });
 }
 
-// ---- handler ----
-export async function POST(req: NextRequest) {
-  const key = process.env.MISTRAL_API_KEY;
-  if (!key) return new Response('missing MISTRAL_API_KEY', { status: 500 });
+function toEventStream(
+  upstream: ReadableStream<Uint8Array>,
+  opts: {
+    meta: ChatEvent;
+    started: number;
+    onEnd: (outcome: string, usage: Usage | undefined, firstTokenMs: number | undefined) => void;
+  },
+): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const parser = new SseDataParser();
+  const reader = upstream.getReader();
+  let usage: Usage | undefined;
+  let firstTokenMs: number | undefined;
 
-  // 读取 body + 过滤“空 assistant 占位”
-  let payload: any;
-  try {
-    payload = await req.json();
-  } catch (e: any) {
-    return new Response(`Bad request JSON: ${e?.message || String(e)}`, { status: 400 });
-  }
-  const incoming = payload?.messages ?? [];
-  const preferModel = payload?.model ?? 'mistral-large-latest';
-  const temperature = typeof payload?.temperature === 'number' ? payload.temperature : 0.2;
-
-  const messages = Array.isArray(incoming)
-    ? incoming.filter((m: any) =>
-        !(m?.role === 'assistant'
-          && (!m?.content || String(m.content).trim() === '')
-          && (!m?.tool_calls || m.tool_calls.length === 0)))
-    : [];
-
-  // 选 CA bundle（先用 NODE_EXTRA_CA_CERTS，再常见路径）
-  const caCandidates = [
-    process.env.NODE_EXTRA_CA_CERTS,
-    '/etc/ssl/cert.pem',
-    '/private/etc/ssl/cert.pem',
-    '/etc/ssl/certs/ca-certificates.crt',
-    '/etc/pki/tls/certs/ca-bundle.crt',
-    '/usr/local/etc/openssl@3/cert.pem',
-    '/opt/homebrew/etc/openssl@3/cert.pem',
-  ].filter(Boolean) as string[];
-
-  let ca: Buffer | undefined;
-  let caPathUsed: string | undefined;
-  for (const p of caCandidates) {
+  const handle = (data: string, emit: (e: ChatEvent) => void) => {
+    if (data === '[DONE]') return;
+    let chunk: {
+      choices?: { delta?: { content?: unknown } }[];
+      usage?: { prompt_tokens?: number; completion_tokens?: number };
+    };
     try {
-      if (p && fs.existsSync(p)) { ca = fs.readFileSync(p); caPathUsed = p; break; }
-    } catch {}
-  }
-
-  // 仅用于本地排错：ALLOW_INSECURE_TLS=1 时跳过证书校验（打通后务必关掉）
-  const allowInsecure = process.env.ALLOW_INSECURE_TLS === '1';
-  const httpsAgent = new https.Agent({ rejectUnauthorized: !allowInsecure, ca });
-
-  try {
-    const modelCandidates = [preferModel, 'mistral-medium-latest', 'mistral-small-latest'];
-
-    // 逐个模型尝试；每个模型最多重试 1 次（指数退避）
-    for (const m of modelCandidates) {
-      for (let attempt = 0; attempt < 2; attempt++) {
-        if (attempt > 0) {
-          const base = 200 * Math.pow(2, attempt - 1);
-          const jitter = Math.floor(Math.random() * base);
-          await sleep(base + jitter);
-        }
-
-        const res = await axios.post(
-          'https://api.mistral.ai/v1/chat/completions',
-          { model: m, messages, temperature, stream: true, safe_prompt: true },
-          {
-            headers: {
-              'Authorization': `Bearer ${key}`,
-              'Content-Type': 'application/json',
-              'Accept': 'text/event-stream',
-            },
-            responseType: 'stream',
-            httpsAgent,
-            validateStatus: () => true,
-          }
-        );
-
-        // 成功：SSE 原样透传，结束
-        if (res.status >= 200 && res.status < 300 && res.data) {
-          const web = toWebStream(res.data);
-          return new Response(web, {
-            headers: {
-              'Content-Type': 'text/event-stream; charset=utf-8',
-              'Cache-Control': 'no-cache, no-transform',
-              'Connection': 'keep-alive',
-              'X-Model-Used': m,
-              ...(caPathUsed ? { 'X-CA-Used': caPathUsed } : {}),
-            },
-          });
-        }
-
-        // 非成功：读取错误体
-        const errText: string = await new Promise((resolve) => {
-          if (!res.data) return resolve('');
-          let s = '';
-          res.data.setEncoding('utf8');
-          res.data.on('data', (c: string) => (s += c));
-          res.data.on('end', () => resolve(s));
-        });
-
-        // 429：容量不足，按退避策略在本模型再试一次；失败则尝试下一个模型
-        const is429 = res.status === 429 || /service_tier_capacity_exceeded/i.test(errText);
-        if (!is429) {
-          const meta = JSON.stringify({ status: res.status, modelTried: m, caPathUsed, allowInsecure });
-          return new Response(`Upstream ${res.status}: ${errText}\n${meta}`, { status: res.status });
-        }
-        // 是 429：继续循环（同模型重试一次），然后切换到下一个模型
-      }
-      // 到这里说明该模型两次都失败（429），换下一个
+      chunk = JSON.parse(data);
+    } catch {
+      return;
     }
+    const text = chunk.choices?.[0]?.delta?.content;
+    if (typeof text === 'string' && text) {
+      firstTokenMs ??= Date.now() - opts.started;
+      emit({ type: 'delta', text });
+    }
+    if (chunk.usage) {
+      usage = {
+        promptTokens: chunk.usage.prompt_tokens ?? 0,
+        completionTokens: chunk.usage.completion_tokens ?? 0,
+      };
+    }
+  };
 
-    // 所有候选模型都因 429 失败
-    const meta = JSON.stringify({ caPathUsed, allowInsecure, tried: modelCandidates });
-    return new Response(`Capacity exceeded for all candidates.\n${meta}`, { status: 429 });
+  let cancelled = false;
+  let ended = false;
+  const end = (outcome: string) => {
+    if (ended) return;
+    ended = true;
+    opts.onEnd(outcome, usage, firstTokenMs);
+  };
 
-  } catch (e: any) {
-    const details = JSON.stringify({
-      message: e?.message || String(e),
-      name: e?.name,
-      code: e?.code,
-      caPathUsed,
-      allowInsecure,
-    });
-    return new Response(`Axios failed: ${details}`, { status: 502 });
-  }
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const emit = (e: ChatEvent) => {
+        if (!cancelled) controller.enqueue(encoder.encode(encodeEvent(e)));
+      };
+      emit(opts.meta);
+      try {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          for (const data of parser.push(decoder.decode(value, { stream: true }))) handle(data, emit);
+        }
+        for (const data of parser.flush()) handle(data, emit);
+        emit({ type: 'done', ms: Date.now() - opts.started, ...(usage ? { usage } : {}) });
+        end(cancelled ? 'client_cancelled' : 'completed');
+      } catch {
+        emit({ type: 'error', code: 'stream_interrupted', message: 'The answer was interrupted. Please try again.' });
+        end(cancelled ? 'client_cancelled' : 'stream_interrupted');
+      } finally {
+        if (!cancelled) controller.close();
+      }
+    },
+    cancel() {
+      cancelled = true;
+      end('client_cancelled');
+      return reader.cancel();
+    },
+  });
+}
+
+function summarize(attempts: Attempt[]) {
+  return attempts.map((a) => `${a.model}:${a.status}`).join(',');
+}
+
+function clientIp(req: Request): string {
+  return (
+    req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+    req.headers.get('x-real-ip') ||
+    'unknown'
+  );
+}
+
+function jsonError(
+  status: number,
+  code: string,
+  message: string,
+  requestId: string,
+  headers: Record<string, string> = {},
+): Response {
+  return new Response(JSON.stringify({ error: { code, message } }), {
+    status,
+    headers: { 'Content-Type': 'application/json', 'X-Request-Id': requestId, ...headers },
+  });
 }

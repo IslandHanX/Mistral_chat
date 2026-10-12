@@ -1,224 +1,94 @@
-# Mistral Next.js Chat (Streaming)
+# Mistral Chat
 
-A minimal, production‑leaning chat app built with **Next.js (App Router)** + **TypeScript** that streams responses from **Mistral AI**’s public API.
-Try it at: https://mistral-chat-xi.vercel.app/
+A small streaming chat on [Mistral AI](https://mistral.ai), built with Next.js and TypeScript, and written to behave well in front of real traffic: it keeps the API key on the server, limits what a visitor can spend, falls back to a cheaper model when one is saturated, and says clearly what happened when something fails.
 
----
+**Live demo:** https://mistral-chat-xi.vercel.app/
 
-## Features
+## What it does
 
-- Server‑side proxy to **avoid exposing your API key**
-- **Streaming** tokens to the browser for a responsive chat UX
-- Sensible defaults: `mistral-large-latest`, `temperature=0.2`, `safe_prompt=true`
-- Auto‑fallback when the preferred model returns **429 capacity** (tries `mistral-medium-latest`, then `mistral-small-latest`)
-- Robust TLS handling (honors `NODE_EXTRA_CA_CERTS`; optional `ALLOW_INSECURE_TLS` for local debugging)
-- Type‑safe, small footprint, no extra UI libs
-- **Unit tests** for the server route, client streaming UI, and a tiny SSE parser
-
----
-
-## Quickstart
-
-1) **Clone or unzip** this project and `cd` into it.  
-2) **Install deps** (Node 18+ recommended):
-
-```bash
-npm i
-```
-
-3) **Add API key**:
-   - Put your key in `MISTRAL_API_KEY="..."` → `.env.local`
-
-4) **Run the dev server**:
-
-```bash
-npm run dev
-```
-
-Open http://localhost:3000
-
----
+- **Streams answers** token by token, with Markdown and code blocks.
+- **Shows how each answer was produced:** the model that answered, whether it fell back from the one requested, the time it took and the tokens it used.
+- **Falls back and retries before the first byte.** On a 429, a 5xx or no first byte within 20 s, it retries once with backoff and jitter, then moves to the next cheaper allowed model. It never switches model once text has reached the user, which would mix two answers.
+- **Protects the key and the bill:** the browser only talks to `/api/chat`; the server accepts only allowed models, caps the conversation size and the output tokens, and rate limits each client.
+- **Cancels end to end:** pressing Stop aborts the request to Mistral too, instead of letting it run.
+- **Fails readably:** errors come back as `{ "error": { "code", "message" } }` with a message fit for the user and no upstream internals; a stream that breaks halfway ends with an explicit error event.
+- **Logs one structured line per request:** outcome, requested and used model, every attempt, time to first token, total time and token usage.
+- **Keeps conversations in the browser** (localStorage), never on the server.
 
 ## How it works
 
-- The UI posts your conversation to `/api/chat`.
-- The API route calls Mistral’s **Chat Completions** endpoint with `{ stream: true }`  
-  and **re‑streams** the upstream SSE to the browser.
-- On the client, we read the `ReadableStream` line‑by‑line, parse `data: {...}`, and
-  incrementally update the last assistant message (rendered with `react-markdown` + GFM).
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant A as /api/chat (Next.js, Node runtime)
+    participant M as Mistral API
+    B->>A: POST messages + model
+    A->>A: rate limit, validate, pick fallback chain
+    loop until a first byte (retry, then cheaper model)
+        A->>M: chat/completions, stream=true
+        M-->>A: 429 / 5xx / timeout, or 200 + SSE
+    end
+    A-->>B: NDJSON: meta, delta…, done (or error)
+```
 
----
+The API turns Mistral's server-sent events into a small event protocol, one JSON object per line:
+
+| Event | Meaning |
+|---|---|
+| `{"type":"meta","model":"…","fallbackFrom":"…"}` | Which model is answering, and which one it replaced |
+| `{"type":"delta","text":"…"}` | Next piece of the answer |
+| `{"type":"done","ms":…,"usage":{…}}` | The answer is complete |
+| `{"type":"error","code":"…","message":"…"}` | The stream broke after it started |
+
+Passing Mistral's raw stream through would leave the browser without the model actually used, the usage, or a clean way to report a failure halfway.
+
+## Limits
+
+| Setting | Value |
+|---|---|
+| Models | `mistral-small-latest`, `mistral-medium-latest` (set `ALLOWED_MODELS` to change) |
+| Conversation | up to 30 messages, 4,000 characters per message, 24,000 in total |
+| Answer | up to 1,024 tokens |
+| Rate limit | 8 requests per minute per client IP |
+
+The rate limiter lives in memory, so on a serverless platform each instance counts separately. That is enough to stop casual abuse of a demo; a shared store such as Redis would be the next step for a real product.
+
+## Run it locally
+
+Requires Node.js 20 or later.
+
+```bash
+npm install
+cp .env.example .env.local   # then set MISTRAL_API_KEY
+npm run dev                  # http://localhost:3000
+```
+
+No key? Set `MOCK_MISTRAL=1` instead: the API streams a canned answer, so the whole UI can be tried offline. It is ignored whenever `MISTRAL_API_KEY` is set.
+
+```bash
+npm run typecheck
+npm test
+npm run build
+```
 
 ## Project structure
 
 ```
-mistral-next-chat/
-├─ app/
-│  ├─ api/chat/route.ts          # Server: proxy to Mistral + SSE pass-through (with 429 fallback)
-│  ├─ globals.css
-│  ├─ layout.tsx
-│  └─ page.tsx                   # Client: streaming UI (Markdown, Stop/Reset)
-├─ lib/
-│  └─ sse.ts                     # SSE line parser
-├─ tests/
-│  ├─ app/api/chat/route.test.ts # Server route tests (axios mocked; Node Readable)
-│  ├─ app/page.test.tsx          # Client streaming UI tests (jsdom; ReadableStream)
-│  └─ sse.test.ts                # Parser smoke test
-├─ __mocks__/
-│  └─ axios.ts                   # (Optional) file-level axios mock
-├─ public/                       # (Optional) static assets (.gitkeep)
-├─ .env.example
-├─ .gitignore
-├─ README.md
-├─ package.json
-├─ tsconfig.json
-├─ vitest.config.ts
-└─ vitest.setup.ts
+app/
+  api/chat/route.ts     API: rate limit, validation, fallback, NDJSON stream, logging
+  page.tsx              Chat page
+lib/
+  config.ts             Models, limits, fallback chain
+  validate.ts           Request validation
+  mistral.ts            Mistral call with retries, timeout and fallback
+  sse.ts                Incremental SSE parser
+  rate-limit.ts         Sliding-window rate limiter
+  events.ts             Event protocol shared by server and client
+  mock.ts               Canned stream for local development
+hooks/useChat.ts        Client state, streaming, stop, local persistence
+components/             Message, composer, empty state
 ```
 
----
+## Tests
 
-## Testing
-
-Run the full test suite:
-
-```bash
-npm test
-```
-
-### What the tests cover
-
-#### 1) Server route — `app/api/chat/route.test.ts`
-
-- **returns 500 when missing `MISTRAL_API_KEY`**  
-  Guard clause so we don’t hit the upstream without credentials.
-
-- **filters empty assistant placeholders before calling upstream**  
-  UI inserts an empty assistant message as a streaming placeholder; we strip it
-  to avoid Mistral 400: “At least one content or tool_calls should be non‑empty”.
-
-- **bubbles up non‑429 upstream error with status**  
-  For non‑capacity errors (e.g., 400), we propagate status & response body so the
-  client can surface a meaningful error.
-
-- **sets `X-Model-Used` header to the chosen model (after fallback)**  
-  If `mistral-large-latest` returns 429 capacity exceeded, we fall back to
-  `mistral-medium-latest`, then `mistral-small-latest`. The final selection is
-  exposed via the response header.
-
-#### 2) Client streaming UI — `app/page.test.tsx`
-
-- **renders assistant markdown as chunks arrive (SSE parsing)**  
-  We stub `fetch` to return a **finite** browser `ReadableStream` that emits:
-  ```
-  data: {"choices":[{"delta":{"content":"Bonjour"}}]}
-
-  data: {"choices":[{"delta":{"content":" !"}}]}
-
-  data: [DONE]
-  ```
-  The test waits until a paragraph renders **“Bonjour !”**.
-
-- **Stop aborts cleanly without throwing and resets pending state**  
-  We stub `fetch` to return a **never‑ending** stream (no `close()`), click **Send**, then **Stop**.  
-  Assertions:
-  - Cancels the reader and resets UI from **Stop → Reset** (`pending=false`).
-  - No uncaught errors.
-
-#### 3) SSE parser smoke test — `tests/sse.test.ts`
-
-- Light check that we can extract `choices[0].delta.content` from `data:` lines.  
-- Handles **partial chunks**, **empty lines**, and **[DONE]** gracefully.
-
-### How we mock streaming
-
-**Browser (client tests):** build `ReadableStream`s.
-
-```ts
-// Finite stream (closes after all lines)
-function makeFiniteSSE(lines: string[]) {
-  return new ReadableStream<Uint8Array>({
-    start(controller) {
-      const enc = new TextEncoder();
-      let i = 0;
-      const push = () => {
-        if (i >= lines.length) return controller.close();
-        controller.enqueue(enc.encode(lines[i++]));
-        queueMicrotask(push);
-      };
-      push();
-    },
-  });
-}
-
-// Never-ending stream (used by the Stop test)
-function makeNeverEndingSSE(first = 'data: {\"choices\":[{\"delta\":{\"content\":\"chunk\"}}]}\n') {
-  return new ReadableStream<Uint8Array>({
-    start(controller) {
-      const enc = new TextEncoder();
-      controller.enqueue(enc.encode(first));
-      // no close(); waits for reader.cancel()
-    },
-  });
-}
-```
-
-**Server route (route tests):** emulate upstream with **Node `Readable`**.
-
-```ts
-import { Readable } from 'node:stream';
-
-function makeNodeStream(chunks: string[]) {
-  const r = new Readable({ read() {} });
-  for (const c of chunks) r.push(c);
-  r.push(null);
-  return r;
-}
-```
-
----
-
-## Notes & Tips
-
-- **Never** expose your API key in client code. All Mistral calls go through the server route.
-- You can switch models in the UI or change the default in `app/api/chat/route.ts`.
-- For deployments (e.g., Vercel), set `MISTRAL_API_KEY` in project env vars.
-- If you’re behind a TLS‑inspecting proxy:
-  - Provide a custom CA via `NODE_EXTRA_CA_CERTS`, or
-  - As a last resort for **local debugging only**, set `ALLOW_INSECURE_TLS=1`.
-
----
-
-## Environment variables
-
-Create `.env.local` and set:
-
-```bash
-MISTRAL_API_KEY=YOUR_KEY_HERE
-
-# Optional: override the API base URL (useful if you run a local proxy or custom gateway)
-# MISTRAL_API_BASE_URL=http://127.0.0.1:8787
-
-# Optional: custom CA bundle for TLS‑inspecting networks
-# NODE_EXTRA_CA_CERTS=/path/to/cert.pem
-
-# Optional: local debug only — disable TLS verification
-# ALLOW_INSECURE_TLS=1
-```
-
-If you are on a restricted network and need a proxy, run a local forwarder and point
-`MISTRAL_API_BASE_URL` to it (e.g., `http://localhost:8080`). The server route will
-send requests to `${MISTRAL_API_BASE_URL}/v1/chat/completions` if provided, otherwise
-it uses `https://api.mistral.ai`.
-
----
-
-## References
-
-- Mistral Chat Completions + Streaming (`stream: true`) and SSE format – see official API docs.
-- Model aliases like `mistral-large-latest` – see Mistral model overview.
-- Next.js App Router streaming patterns – see official Next.js docs/blog.
-
----
-
-Made for the Mistral AI chat task. Have fun! 🎯
+Vitest covers the validation rules, the rate limiter, the SSE parser, the API route (streaming, fallback order, non-retryable errors, a stream that breaks halfway, rate limiting, mock mode) and the chat page (streaming render, server errors, Stop). CI runs type checking, tests and a production build on every push.
